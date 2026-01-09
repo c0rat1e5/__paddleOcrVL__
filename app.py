@@ -112,10 +112,28 @@ def document_parse(image):
         
         markdown_text = ""
         for res in output:
+            # Handle different output formats
             if hasattr(res, 'markdown'):
-                markdown_text += res.markdown + "\n\n"
+                md = res.markdown
+                if isinstance(md, dict):
+                    markdown_text += md.get('text', str(md)) + "\n\n"
+                else:
+                    markdown_text += str(md) + "\n\n"
             elif hasattr(res, 'text'):
-                markdown_text += res.text + "\n\n"
+                txt = res.text
+                if isinstance(txt, dict):
+                    markdown_text += txt.get('text', str(txt)) + "\n\n"
+                else:
+                    markdown_text += str(txt) + "\n\n"
+            elif isinstance(res, dict):
+                if 'markdown' in res:
+                    md = res['markdown']
+                    if isinstance(md, dict):
+                        markdown_text += md.get('text', str(md)) + "\n\n"
+                    else:
+                        markdown_text += str(md) + "\n\n"
+                elif 'text' in res:
+                    markdown_text += str(res['text']) + "\n\n"
         
         if not markdown_text.strip():
             markdown_text = "No content recognized."
