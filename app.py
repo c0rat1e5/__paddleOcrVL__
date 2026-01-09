@@ -58,13 +58,15 @@ def load_doc_parser():
     return doc_parser
 
 
-def element_recognize(image, task):
+def element_recognize(image, task, progress=gr.Progress()):
     """Element-level recognition using VLM"""
     if image is None:
         return "Please upload an image."
     
+    progress(0.1, desc="Loading model...")
     m, p = load_vlm()
     
+    progress(0.3, desc="Preparing image...")
     if isinstance(image, str):
         image = Image.open(image).convert("RGB")
     elif not isinstance(image, Image.Image):
@@ -75,22 +77,26 @@ def element_recognize(image, task):
         {"type": "text", "text": PROMPTS[task]},
     ]}]
     
+    progress(0.5, desc="Processing...")
     inputs = p.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=True,
         return_dict=True, return_tensors="pt"
     ).to(DEVICE)
     
+    progress(0.7, desc="Generating output...")
     with torch.no_grad():
         outputs = m.generate(**inputs, max_new_tokens=4096)
     
+    progress(0.9, desc="Decoding...")
     result = p.batch_decode(outputs, skip_special_tokens=True)[0]
     if "assistant" in result.lower():
         result = result.split("assistant")[-1].strip()
     
+    progress(1.0, desc="Done!")
     return result
 
 
-def document_parse(image):
+def document_parse(image, progress=gr.Progress()):
     """Document parsing with layout detection"""
     if image is None:
         return "Please upload an image.", ""
@@ -98,6 +104,7 @@ def document_parse(image):
     # Save image to temp file
     temp_path = None
     try:
+        progress(0.1, desc="Preparing image...")
         if isinstance(image, Image.Image):
             temp_path = tempfile.mktemp(suffix=".png")
             image.save(temp_path)
@@ -107,8 +114,15 @@ def document_parse(image):
             temp_path = tempfile.mktemp(suffix=".png")
             Image.fromarray(image).save(temp_path)
         
+        progress(0.2, desc="Loading Document Parser...")
         parser = load_doc_parser()
+        
+        progress(0.4, desc="Detecting layout...")
+        print("Starting document parsing...")
         output = parser.predict(temp_path)
+        print("Parsing complete!")
+        
+        progress(0.8, desc="Extracting text...")
         
         markdown_text = ""
         for res in output:
@@ -138,6 +152,7 @@ def document_parse(image):
         if not markdown_text.strip():
             markdown_text = "No content recognized."
         
+        progress(1.0, desc="Done!")
         return markdown_text.strip(), markdown_text.strip()
     
     except Exception as e:
