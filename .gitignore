@@ -77,12 +77,14 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
+
+# OS
+.DS_Store
+Thumbs.db
+
+
 # Models (large files - download separately)
 models/
 
 # Gradio
 flagged/
-
-# OS
-.DS_Store
-Thumbs.db
