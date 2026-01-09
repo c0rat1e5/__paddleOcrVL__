@@ -83,6 +83,11 @@ def load_doc_parser():
     return doc_parser
 
 
+#####################################################################
+#####################################################################
+# Just for CLI用やテスト用 ###########################################
+
+
 def element_recognize(image, task, progress=gr.Progress()):
     """Element-level recognition using VLM"""
     # print(image)
@@ -241,6 +246,10 @@ def document_parse(image, progress=gr.Progress()):
         if temp_path and temp_path != image and os.path.exists(temp_path):
             os.remove(temp_path)
 
+
+# Just for CLI用やテスト用 ###########################################
+#####################################################################
+#####################################################################
 
 # Gradio UI
 with gr.Blocks(title="PaddleOCR-VL Demo") as demo:
