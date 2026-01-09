@@ -1,16 +1,19 @@
 """
 PaddleOCR-VL Gradio Application
+Document Parsing + Element-level Recognition
 """
 
 import os
+import tempfile
 import torch
 import gradio as gr
 from PIL import Image
 from transformers import AutoModelForCausalLM, AutoProcessor
 
-# Configuration - ローカルモデルパスを使用
+# Configuration
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(SCRIPT_DIR, "models", "PaddleOCR-VL")
+LAYOUT_MODEL_PATH = os.path.join(SCRIPT_DIR, "models", "PP-DocLayoutV2")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
@@ -21,28 +24,46 @@ PROMPTS = {
     "Chart": "Chart Recognition:",
 }
 
-# Global model
-model = None
-processor = None
+# Global models
+vlm_model = None
+vlm_processor = None
+doc_parser = None
 
 
-def load_model():
-    global model, processor
-    if model is None:
-        print(f"Loading model on {DEVICE}...")
-        model = AutoModelForCausalLM.from_pretrained(
+def load_vlm():
+    """Load VLM model for element-level recognition"""
+    global vlm_model, vlm_processor
+    if vlm_model is None:
+        print(f"Loading VLM on {DEVICE}...")
+        vlm_model = AutoModelForCausalLM.from_pretrained(
             MODEL_PATH, trust_remote_code=True, torch_dtype=DTYPE
         ).to(DEVICE).eval()
-        processor = AutoProcessor.from_pretrained(MODEL_PATH, trust_remote_code=True)
-        print("Model loaded!")
-    return model, processor
+        vlm_processor = AutoProcessor.from_pretrained(MODEL_PATH, trust_remote_code=True)
+        print("VLM loaded!")
+    return vlm_model, vlm_processor
 
 
-def recognize(image, task):
+def load_doc_parser():
+    """Load PaddleOCR Document Parser with local models"""
+    global doc_parser
+    if doc_parser is None:
+        print("Loading Document Parser from local models...")
+        os.environ["DISABLE_MODEL_SOURCE_CHECK"] = "True"
+        from paddleocr import PaddleOCRVL
+        doc_parser = PaddleOCRVL(
+            layout_detection_model_dir=LAYOUT_MODEL_PATH,
+            vl_rec_model_dir=MODEL_PATH
+        )
+        print("Document Parser loaded!")
+    return doc_parser
+
+
+def element_recognize(image, task):
+    """Element-level recognition using VLM"""
     if image is None:
         return "Please upload an image."
     
-    m, p = load_model()
+    m, p = load_vlm()
     
     if isinstance(image, str):
         image = Image.open(image).convert("RGB")
@@ -69,24 +90,89 @@ def recognize(image, task):
     return result
 
 
-# Gradio UI
-with gr.Blocks() as demo:
-    gr.Markdown("# 🔍 PaddleOCR-VL Demo")
+def document_parse(image):
+    """Document parsing with layout detection"""
+    if image is None:
+        return "Please upload an image.", ""
     
-    with gr.Row():
-        with gr.Column():
-            image_input = gr.Image(label="Upload Image", type="pil")
-            task_select = gr.Radio(
-                choices=["OCR", "Formula", "Table", "Chart"],
-                value="OCR", label="Recognition Type"
-            )
-            btn = gr.Button("Recognize", variant="primary")
+    # Save image to temp file
+    temp_path = None
+    try:
+        if isinstance(image, Image.Image):
+            temp_path = tempfile.mktemp(suffix=".png")
+            image.save(temp_path)
+        elif isinstance(image, str):
+            temp_path = image
+        else:
+            temp_path = tempfile.mktemp(suffix=".png")
+            Image.fromarray(image).save(temp_path)
         
-        with gr.Column():
-            output = gr.Markdown(label="Result")
+        parser = load_doc_parser()
+        output = parser.predict(temp_path)
+        
+        markdown_text = ""
+        for res in output:
+            if hasattr(res, 'markdown'):
+                markdown_text += res.markdown + "\n\n"
+            elif hasattr(res, 'text'):
+                markdown_text += res.text + "\n\n"
+        
+        if not markdown_text.strip():
+            markdown_text = "No content recognized."
+        
+        return markdown_text.strip(), markdown_text.strip()
     
-    btn.click(fn=recognize, inputs=[image_input, task_select], outputs=output)
+    except Exception as e:
+        error_msg = f"Error during parsing: {str(e)}"
+        return error_msg, error_msg
+    finally:
+        if temp_path and temp_path != image and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+# Gradio UI
+with gr.Blocks(title="PaddleOCR-VL Demo") as demo:
+    gr.Markdown("# 🔍 PaddleOCR-VL Demo")
+    gr.Markdown("**Document Parsing** with layout detection or **Element-level Recognition** for single elements")
+    
+    with gr.Tabs():
+        # Document Parsing Tab
+        with gr.Tab("📄 Document Parsing"):
+            gr.Markdown("Upload a full document page for automatic layout detection and parsing.")
+            
+            with gr.Row():
+                with gr.Column(scale=1):
+                    doc_image = gr.Image(label="Upload Document", type="pil")
+                    doc_btn = gr.Button("Parse Document", variant="primary")
+                
+                with gr.Column(scale=1):
+                    with gr.Tabs():
+                        with gr.Tab("Markdown Preview"):
+                            doc_preview = gr.Markdown(label="Result")
+                        with gr.Tab("Raw Output"):
+                            doc_raw = gr.Code(label="Markdown Source", language="markdown")
+            
+            doc_btn.click(fn=document_parse, inputs=[doc_image], outputs=[doc_preview, doc_raw])
+        
+        # Element Recognition Tab
+        with gr.Tab("🔤 Element Recognition"):
+            gr.Markdown("Upload a cropped element (text, formula, table, or chart) for recognition.")
+            
+            with gr.Row():
+                with gr.Column(scale=1):
+                    elem_image = gr.Image(label="Upload Element", type="pil")
+                    task_select = gr.Radio(
+                        choices=["OCR", "Formula", "Table", "Chart"],
+                        value="OCR", label="Recognition Type"
+                    )
+                    elem_btn = gr.Button("Recognize", variant="primary")
+                
+                with gr.Column(scale=1):
+                    elem_output = gr.Markdown(label="Result")
+            
+            elem_btn.click(fn=element_recognize, inputs=[elem_image, task_select], outputs=elem_output)
 
 if __name__ == "__main__":
     print(f"Device: {DEVICE}")
+    print("Loading models on first use...")
     demo.launch(server_name="0.0.0.0", server_port=7860)
