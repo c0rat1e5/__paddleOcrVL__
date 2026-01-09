@@ -176,7 +176,8 @@ with gr.Blocks(title="PaddleOCR-VL Demo") as demo:
             with gr.Row():
                 with gr.Column(scale=1):
                     doc_image = gr.Image(label="Upload Document", type="pil")
-                    doc_btn = gr.Button("Parse Document", variant="primary")
+                    doc_status = gr.Markdown("", elem_id="doc_status")
+                    doc_btn = gr.Button("📄 Parse Document", variant="primary")
                 
                 with gr.Column(scale=1):
                     with gr.Tabs():
@@ -185,7 +186,84 @@ with gr.Blocks(title="PaddleOCR-VL Demo") as demo:
                         with gr.Tab("Raw Output"):
                             doc_raw = gr.Code(label="Markdown Source", language="markdown")
             
-            doc_btn.click(fn=document_parse, inputs=[doc_image], outputs=[doc_preview, doc_raw])
+            def doc_parse_with_status(image):
+                yield "⏳ **Processing...**", "", ""
+                if image is None:
+                    yield "❌ Please upload an image.", "Please upload an image.", ""
+                    return
+                
+                try:
+                    import tempfile
+                    temp_path = None
+                    if isinstance(image, Image.Image):
+                        temp_path = tempfile.mktemp(suffix=".png")
+                        image.save(temp_path)
+                    elif isinstance(image, str):
+                        temp_path = image
+                    else:
+                        temp_path = tempfile.mktemp(suffix=".png")
+                        Image.fromarray(image).save(temp_path)
+                    
+                    yield "🔄 **Loading models...**", "", ""
+                    parser = load_doc_parser()
+                    
+                    yield "🔍 **Detecting layout & recognizing...**", "", ""
+                    print("Starting document parsing...")
+                    output = parser.predict(temp_path)
+                    print("Parsing complete!")
+                    
+                    markdown_text = ""
+                    for res in output:
+                        if hasattr(res, 'markdown'):
+                            md = res.markdown
+                            if isinstance(md, dict):
+                                markdown_text += md.get('text', str(md)) + "\n\n"
+                            else:
+                                markdown_text += str(md) + "\n\n"
+                        elif hasattr(res, 'text'):
+                            txt = res.text
+                            if isinstance(txt, dict):
+                                markdown_text += txt.get('text', str(txt)) + "\n\n"
+                            else:
+                                markdown_text += str(txt) + "\n\n"
+                        elif isinstance(res, dict):
+                            if 'markdown' in res:
+                                md = res['markdown']
+                                if isinstance(md, dict):
+                                    markdown_text += md.get('text', str(md)) + "\n\n"
+                                else:
+                                    markdown_text += str(md) + "\n\n"
+                            elif 'text' in res:
+                                markdown_text += str(res['text']) + "\n\n"
+                    
+                    if not markdown_text.strip():
+                        markdown_text = "No content recognized."
+                    
+                    if temp_path and temp_path != image and os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    
+                    yield "✅ **Done!**", markdown_text.strip(), markdown_text.strip()
+                    return
+                    
+                except Exception as e:
+                    yield f"❌ **Error:** {str(e)}", f"Error: {str(e)}", ""
+                    return
+            
+            doc_btn.click(
+                fn=doc_parse_with_status, 
+                inputs=[doc_image], 
+                outputs=[doc_status, doc_preview, doc_raw]
+            ).then(
+                fn=lambda: gr.update(value="📄 Parse Document", interactive=True),
+                outputs=[doc_btn]
+            )
+            
+            # Disable button while processing
+            doc_btn.click(
+                fn=lambda: gr.update(value="⏳ Processing...", interactive=False),
+                outputs=[doc_btn],
+                queue=False
+            )
         
         # Element Recognition Tab
         with gr.Tab("🔤 Element Recognition"):
@@ -198,12 +276,68 @@ with gr.Blocks(title="PaddleOCR-VL Demo") as demo:
                         choices=["OCR", "Formula", "Table", "Chart"],
                         value="OCR", label="Recognition Type"
                     )
-                    elem_btn = gr.Button("Recognize", variant="primary")
+                    elem_status = gr.Markdown("", elem_id="elem_status")
+                    elem_btn = gr.Button("🔤 Recognize", variant="primary")
                 
                 with gr.Column(scale=1):
                     elem_output = gr.Markdown(label="Result")
             
-            elem_btn.click(fn=element_recognize, inputs=[elem_image, task_select], outputs=elem_output)
+            def elem_recognize_with_status(image, task):
+                yield "⏳ **Processing...**", ""
+                if image is None:
+                    yield "❌ Please upload an image.", "Please upload an image."
+                    return
+                
+                try:
+                    yield "🔄 **Loading model...**", ""
+                    m, p = load_vlm()
+                    
+                    yield "🖼️ **Preparing image...**", ""
+                    if isinstance(image, str):
+                        image = Image.open(image).convert("RGB")
+                    elif not isinstance(image, Image.Image):
+                        image = Image.fromarray(image).convert("RGB")
+                    
+                    messages = [{"role": "user", "content": [
+                        {"type": "image", "image": image},
+                        {"type": "text", "text": PROMPTS[task]},
+                    ]}]
+                    
+                    yield "🔍 **Recognizing...**", ""
+                    inputs = p.apply_chat_template(
+                        messages, tokenize=True, add_generation_prompt=True,
+                        return_dict=True, return_tensors="pt"
+                    ).to(DEVICE)
+                    
+                    with torch.no_grad():
+                        outputs = m.generate(**inputs, max_new_tokens=4096)
+                    
+                    result = p.batch_decode(outputs, skip_special_tokens=True)[0]
+                    if "assistant" in result.lower():
+                        result = result.split("assistant")[-1].strip()
+                    
+                    yield "✅ **Done!**", result
+                    return
+                    
+                except Exception as e:
+                    yield f"❌ **Error:** {str(e)}", f"Error: {str(e)}"
+                    return
+            
+            elem_btn.click(
+                fn=elem_recognize_with_status, 
+                inputs=[elem_image, task_select], 
+                outputs=[elem_status, elem_output]
+            ).then(
+                fn=lambda: gr.update(value="🔤 Recognize", interactive=True),
+                outputs=[elem_btn]
+            )
+            
+            # Disable button while processing
+            elem_btn.click(
+                fn=lambda: gr.update(value="⏳ Processing...", interactive=False),
+                outputs=[elem_btn],
+                queue=False
+            )
 
 if __name__ == "__main__":
     print(f"Device: {DEVICE}")
