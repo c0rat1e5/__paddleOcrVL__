@@ -249,77 +249,230 @@ def batch_process_folder(folder_path, mode, task, save_results):
         yield f"✅ **完了! {total}個の画像を処理しました**", all_output, None
 
 
+def batch_process_uploaded_files(files, mode, task):
+    """Batch process uploaded folder/files"""
+    
+    if not files:
+        yield "❌ フォルダをアップロードしてください", "", None
+        return
+    
+    # Handle both single file path and list of files
+    if isinstance(files, str):
+        # Single directory path
+        files = [files]
+    
+    # Filter to only image files
+    image_files = []
+    for f in files:
+        # Handle different input formats
+        if hasattr(f, 'name'):
+            file_path = f.name
+        else:
+            file_path = str(f)
+        
+        ext = Path(file_path).suffix.lower()
+        if ext in IMAGE_EXTENSIONS:
+            image_files.append(file_path)
+    
+    if not image_files:
+        yield "❌ 有効な画像ファイルがありません", "", None
+        return
+    
+    total = len(image_files)
+    yield f"🔍 **{total}個の画像を検出しました。処理を開始します...**", "", None
+    
+    # Load model
+    if mode == "Document Parsing":
+        yield f"🔄 **Document Parserを読み込み中...**", "", None
+        parser = load_doc_parser()
+    else:
+        yield f"🔄 **VLMモデルを読み込み中...**", "", None
+        model, processor = load_vlm()
+    
+    results = {}
+    all_output = ""
+    
+    for i, file_path in enumerate(image_files):
+        filename = Path(file_path).name
+        progress_msg = f"⏳ **処理中: {i+1}/{total}** - `{filename}`"
+        yield progress_msg, all_output, None
+        
+        print(f"Processing [{i+1}/{total}]: {filename}")
+        
+        if mode == "Document Parsing":
+            result = process_single_image_doc(file_path, parser)
+        else:
+            result = process_single_image_elem(file_path, task, model, processor)
+        
+        results[filename] = result
+        
+        # Build cumulative output
+        all_output += f"## 📄 {filename}\n\n{result}\n\n---\n\n"
+        
+        yield progress_msg, all_output, None
+    
+    # Save results to temp file for download
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create temp directory for results
+    temp_dir = tempfile.mkdtemp()
+    
+    # Save as Markdown
+    md_file = Path(temp_dir) / f"ocr_results_{timestamp}.md"
+    with open(md_file, "w", encoding="utf-8") as f:
+        f.write(f"# OCR Results\n\n")
+        f.write(f"**Mode:** {mode}\n\n")
+        f.write(f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        f.write(f"**Total Images:** {total}\n\n")
+        f.write("---\n\n")
+        f.write(all_output)
+    
+    # Save as JSON
+    json_file = Path(temp_dir) / f"ocr_results_{timestamp}.json"
+    with open(json_file, "w", encoding="utf-8") as f:
+        json.dump({
+            "mode": mode,
+            "task": task if mode == "Element Recognition" else None,
+            "timestamp": timestamp,
+            "total_images": total,
+            "results": results
+        }, f, ensure_ascii=False, indent=2)
+    
+    yield f"✅ **完了! {total}個の画像を処理しました**", all_output, str(md_file)
+
+
 # Gradio UI
 with gr.Blocks(title="PaddleOCR-VL Batch Processing") as demo:
     gr.Markdown("# 📁 PaddleOCR-VL Batch Folder Processing")
-    gr.Markdown("フォルダ内のすべての画像を一括でOCR処理します")
+    gr.Markdown("複数の画像を一括でOCR処理します")
     
-    with gr.Row():
-        with gr.Column(scale=1):
-            folder_input = gr.Textbox(
-                label="📂 フォルダパス",
-                placeholder="/path/to/your/image/folder",
-                info="処理したい画像が入っているフォルダのパスを入力"
+    with gr.Tabs():
+        # Upload Files Tab
+        with gr.Tab("� フォルダアップロード"):
+            gr.Markdown("フォルダをドラッグ&ドロップまたは選択してアップロード")
+            
+            with gr.Row():
+                with gr.Column(scale=1):
+                    file_upload = gr.File(
+                        label="📂 フォルダをアップロード",
+                        file_count="directory"
+                    )
+                    
+                    upload_mode_select = gr.Radio(
+                        choices=["Document Parsing", "Element Recognition"],
+                        value="Document Parsing",
+                        label="処理モード",
+                        info="Document Parsing: レイアウト検出あり / Element Recognition: 単純OCR"
+                    )
+                    
+                    upload_task_select = gr.Radio(
+                        choices=["OCR", "Formula", "Table", "Chart"],
+                        value="OCR",
+                        label="認識タイプ (Element Recognitionの場合)",
+                        visible=True
+                    )
+                    
+                    upload_status = gr.Markdown("", elem_id="upload_status")
+                    
+                    upload_btn = gr.Button("🚀 一括処理開始", variant="primary", size="lg")
+                
+                with gr.Column(scale=2):
+                    with gr.Tabs():
+                        with gr.Tab("📝 結果プレビュー"):
+                            upload_preview = gr.Markdown(label="Results")
+                        with gr.Tab("📥 ダウンロード"):
+                            upload_download = gr.File(label="結果ファイル")
+            
+            # Show/hide task selector based on mode
+            def update_upload_task_visibility(mode):
+                return gr.update(visible=(mode == "Element Recognition"))
+            
+            upload_mode_select.change(
+                fn=update_upload_task_visibility,
+                inputs=[upload_mode_select],
+                outputs=[upload_task_select]
             )
             
-            mode_select = gr.Radio(
-                choices=["Document Parsing", "Element Recognition"],
-                value="Document Parsing",
-                label="処理モード",
-                info="Document Parsing: レイアウト検出あり / Element Recognition: 単純OCR"
+            # Process button click
+            upload_btn.click(
+                fn=batch_process_uploaded_files,
+                inputs=[file_upload, upload_mode_select, upload_task_select],
+                outputs=[upload_status, upload_preview, upload_download]
             )
-            
-            task_select = gr.Radio(
-                choices=["OCR", "Formula", "Table", "Chart"],
-                value="OCR",
-                label="認識タイプ (Element Recognitionの場合)",
-                visible=True
-            )
-            
-            save_checkbox = gr.Checkbox(
-                label="📥 結果をファイルに保存",
-                value=True,
-                info="処理結果をMarkdownとJSONで保存します"
-            )
-            
-            status_display = gr.Markdown("", elem_id="status")
-            
-            process_btn = gr.Button("🚀 一括処理開始", variant="primary", size="lg")
         
-        with gr.Column(scale=2):
-            with gr.Tabs():
-                with gr.Tab("📝 結果プレビュー"):
-                    result_preview = gr.Markdown(label="Results")
-                with gr.Tab("📥 ダウンロード"):
-                    download_file = gr.File(label="結果ファイル")
-    
-    # Show/hide task selector based on mode
-    def update_task_visibility(mode):
-        return gr.update(visible=(mode == "Element Recognition"))
-    
-    mode_select.change(
-        fn=update_task_visibility,
-        inputs=[mode_select],
-        outputs=[task_select]
-    )
-    
-    # Process button click
-    process_btn.click(
-        fn=batch_process_folder,
-        inputs=[folder_input, mode_select, task_select, save_checkbox],
-        outputs=[status_display, result_preview, download_file]
-    )
+        # Server Folder Tab
+        with gr.Tab("📂 サーバーフォルダ指定"):
+            gr.Markdown("サーバー上のフォルダパスを直接指定（サーバーに直接アクセスできる場合）")
+            
+            with gr.Row():
+                with gr.Column(scale=1):
+                    folder_input = gr.Textbox(
+                        label="📂 フォルダパス（サーバー上のパス）",
+                        placeholder="/home/user/images",
+                        info="サーバー上の画像フォルダのパスを入力"
+                    )
+                    
+                    mode_select = gr.Radio(
+                        choices=["Document Parsing", "Element Recognition"],
+                        value="Document Parsing",
+                        label="処理モード",
+                        info="Document Parsing: レイアウト検出あり / Element Recognition: 単純OCR"
+                    )
+                    
+                    task_select = gr.Radio(
+                        choices=["OCR", "Formula", "Table", "Chart"],
+                        value="OCR",
+                        label="認識タイプ (Element Recognitionの場合)",
+                        visible=True
+                    )
+                    
+                    save_checkbox = gr.Checkbox(
+                        label="📥 結果をファイルに保存",
+                        value=True,
+                        info="処理結果をMarkdownとJSONで保存します"
+                    )
+                    
+                    status_display = gr.Markdown("", elem_id="status")
+                    
+                    process_btn = gr.Button("🚀 一括処理開始", variant="primary", size="lg")
+                
+                with gr.Column(scale=2):
+                    with gr.Tabs():
+                        with gr.Tab("📝 結果プレビュー"):
+                            result_preview = gr.Markdown(label="Results")
+                        with gr.Tab("📥 ダウンロード"):
+                            download_file = gr.File(label="結果ファイル")
+            
+            # Show/hide task selector based on mode
+            def update_task_visibility(mode):
+                return gr.update(visible=(mode == "Element Recognition"))
+            
+            mode_select.change(
+                fn=update_task_visibility,
+                inputs=[mode_select],
+                outputs=[task_select]
+            )
+            
+            # Process button click
+            process_btn.click(
+                fn=batch_process_folder,
+                inputs=[folder_input, mode_select, task_select, save_checkbox],
+                outputs=[status_display, result_preview, download_file]
+            )
     
     # Examples
     gr.Markdown("---")
     gr.Markdown("### 💡 使い方")
     gr.Markdown("""
-1. **フォルダパス**を入力（例: `/home/user/documents/scans`）
-2. **処理モード**を選択
-   - **Document Parsing**: 文書全体のレイアウト検出＋OCR（推奨）
-   - **Element Recognition**: 単一要素の認識（数式、表、チャートなど）
-3. **一括処理開始**ボタンをクリック
-4. 処理完了後、結果が表示されます
+**� フォルダアップロード（推奨）:**
+1. 「フォルダをアップロード」をクリック
+2. 画像が入っているフォルダを選択
+3. 処理モードを選択
+4. 「一括処理開始」ボタンをクリック
+
+**📂 サーバーフォルダ指定:**
+- サーバーに直接アクセスできる場合のみ使用
+- サーバー上のLinuxパスを入力（例: `/home/user/images`）
 
 📌 **対応フォーマット**: PNG, JPG, JPEG, BMP, TIFF, WebP, GIF
     """)
